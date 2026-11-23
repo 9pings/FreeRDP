@@ -1197,7 +1197,7 @@ xf_rail_monitored_desktop(WINPR_ATTR_UNUSED rdpContext* context,
 		if (xfc->rail_activation_click &&
 		    GetTickCount64() - xfc->rail_activation_click < 2000)
 		{
-			xfAppWindow* window = xf_rail_get_window(xfc, monitoredDesktop->activeWindowId, FALSE);
+			xfAppWindow* window = xf_rail_get_window(xfc, monitoredDesktop->activeWindowId, FALSE, FALSE);
 			if (window && (window->dwStyle & (WS_CAPTION | WS_SYSMENU)) &&
 			    !(window->dwExStyle & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)))
 			{
@@ -1205,7 +1205,7 @@ xf_rail_monitored_desktop(WINPR_ATTR_UNUSED rdpContext* context,
 				xfc->rail_activation_click = 0;
 				xf_SendClientEvent(xfc, window->handle, active, 3, 2, 0, 0);
 			}
-			xf_rail_return_window(window, FALSE);
+			xf_rail_return_window(window, FALSE, FALSE);
 		}
 	}
 	if (orderInfo->fieldFlags & WINDOW_ORDER_FIELD_DESKTOP_ZORDER)
