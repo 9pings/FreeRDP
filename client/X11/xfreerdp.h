@@ -177,6 +177,7 @@ struct xf_context
 	xfFullscreenMonitors fullscreenMonitors;
 	int current_desktop;
 	BOOL remote_app;
+	UINT64 rail_activation_click;
 	HANDLE mutex;
 	BOOL UseXThreads;
 	BOOL cursorHidden;

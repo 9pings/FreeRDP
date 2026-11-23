@@ -28,6 +28,7 @@
 #include <math.h>
 
 #include <winpr/assert.h>
+#include <winpr/sysinfo.h>
 #include <winpr/path.h>
 
 #include <freerdp/log.h>
@@ -373,6 +374,24 @@ static BOOL xf_event_Expose(xfContext* xfc, const XExposeEvent* event, BOOL app)
 	rdpSettings* settings = xfc->common.context.settings;
 	WINPR_ASSERT(settings);
 
+	/* RemoteApp exposes belong to distinct windows. A single deferred slot
+	 * loses every window except the last one when several are restored. */
+	if (app)
+	{
+		BOOL redraw = FALSE;
+		UINT64 windowId = 0;
+		UINT32 surfaceId = UINT16_MAX;
+		xfAppWindow* window = xf_AppWindowFromX11Window(xfc, event->window);
+		if (window)
+		{
+			windowId = window->windowId;
+			surfaceId = window->surfaceId;
+			redraw = xf_UpdateWindowArea(xfc, window, event->x, event->y, event->width, event->height);
+		}
+		xf_rail_return_window(window, FALSE);
+		return !redraw || xf_AppWindowRepaintFromSurface(xfc, windowId, surfaceId);
+	}
+
 	if (!app && (freerdp_settings_get_bool(settings, FreeRDP_SmartSizing) ||
 	             freerdp_settings_get_bool(settings, FreeRDP_MultiTouchGestures)))
 	{
@@ -536,6 +555,8 @@ BOOL xf_generic_ButtonEvent_(xfContext* xfc, int x, int y, int button, Window wi
 				xf_rail_return_window(appWindow, FALSE, FALSE);
 				if (!appWindow)
 					return TRUE;
+				if (down)
+					xfc->rail_activation_click = GetTickCount64();
 
 				/* Translate to desktop coordinates */
 				XTranslateCoordinates(xfc->display, window, RootWindowOfScreen(xfc->screen), x, y,
@@ -684,17 +705,19 @@ static BOOL xf_event_FocusIn(xfContext* xfc, const XFocusInEvent* event, BOOL ap
 	 * if the WM decided to use an alternate event order */
 	if (!app)
 		xf_keyboard_release_all_keypress(xfc);
-	else
+	else if (event->mode == NotifyNormal && event->detail != NotifyInferior)
 	{
-		/* Do not send TS_RAIL_ORDER_ACTIVATE to the server.
-		 *
-		 * In a RemoteApp session the server treats "this window became active"
-		 * as "the previously active window became inactive". A drop-down menu
-		 * is a separate top level window, so opening it deactivates the owner
-		 * window and Windows closes the menu again: the menu only flashes.
-		 * Skipping the notification keeps drop-down/context menus usable.
-		 *
-		 * See issues #4660, #1528 and #7460. */
+		/* Activate ordinary application windows selected from the local taskbar.
+		 * Leave popup/menu focus and FocusOut alone: deactivating their owner
+		 * while opening a menu would make Windows close the menu immediately. */
+		xfAppWindow* window = xf_AppWindowFromX11Window(xfc, event->window);
+		const BOOL activate = window && !window->minimized &&
+		    window->rail_state != WINDOW_HIDE && window->rail_state != WINDOW_SHOW_MINIMIZED &&
+		    (window->dwStyle & (WS_CAPTION | WS_SYSMENU)) &&
+		    !(window->dwExStyle & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW));
+		xf_rail_return_window(window, FALSE);
+		if (activate && !xf_rail_send_activate(xfc, event->window, TRUE))
+			return FALSE;
 	}
 
 	xf_pointer_update_scale(xfc);
@@ -1022,6 +1045,7 @@ static BOOL xf_event_PropertyNotify(xfContext* xfc, const XPropertyEvent* event,
 		BOOL status = FALSE;
 		BOOL minimized = FALSE;
 		BOOL minimizedChanged = FALSE;
+		BOOL withdrawn = FALSE;
 		BOOL fullscreen = FALSE;
 		unsigned long nitems = 0;
 		unsigned long bytes = 0;
@@ -1118,13 +1142,14 @@ static BOOL xf_event_PropertyNotify(xfContext* xfc, const XPropertyEvent* event,
 			}
 		}
 
-		if (event->atom == xfc->WM_STATE)
+		if (app || event->atom == xfc->WM_STATE)
 		{
 			status =
 			    xf_GetWindowProperty(xfc, event->window, xfc->WM_STATE, 1, &nitems, &bytes, &prop);
 
-			if (status)
+			if (status && nitems > 0)
 			{
+				withdrawn = (*(const long*)prop == WithdrawnState);
 				/* If the window is in the iconic state */
 				if (((UINT32)*prop == 3) && !IsGnome())
 				{
@@ -1147,6 +1172,12 @@ static BOOL xf_event_PropertyNotify(xfContext* xfc, const XPropertyEvent* event,
 		if (app)
 		{
 			WINPR_ASSERT(appWindow);
+			const BYTE observed = withdrawn ? WINDOW_HIDE : appWindow->minimized ? WINDOW_SHOW_MINIMIZED :
+			    (appWindow->maxVert && appWindow->maxHorz) ? WINDOW_SHOW_MAXIMIZED : WINDOW_SHOW;
+			/* WM properties arrive asynchronously after a server ShowWindow. Do not
+			 * echo intermediate (old) states back as new user commands. */
+			if (!xf_rail_local_state_ready(appWindow, observed, GetTickCount64()))
+				goto fail;
 			if (appWindow->maxVert && appWindow->maxHorz && !appWindow->minimized)
 			{
 				if (appWindow->rail_state != WINDOW_SHOW_MAXIMIZED)

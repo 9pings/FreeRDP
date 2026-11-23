@@ -102,6 +102,8 @@ struct xf_app_window
 	BOOL override_redirect;
 	xfLocalMove local_move;
 	BYTE rail_state;
+	BOOL rail_state_pending;
+	UINT64 rail_state_pending_since;
 	BOOL maxVert;
 	BOOL maxHorz;
 	BOOL minimized;
@@ -170,5 +172,7 @@ BOOL xf_rail_del_window(xfContext* xfc, UINT64 id);
 int xf_rail_init(xfContext* xfc, RailClientContext* rail);
 
 int xf_rail_uninit(xfContext* xfc, RailClientContext* rail);
+
+BOOL xf_rail_local_state_ready(xfAppWindow* window, BYTE observed, UINT64 now);
 
 #endif /* FREERDP_CLIENT_X11_RAIL_H */

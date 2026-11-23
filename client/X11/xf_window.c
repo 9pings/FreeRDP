@@ -21,6 +21,7 @@
  */
 
 #include <freerdp/config.h>
+#include <winpr/sysinfo.h>
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -1279,6 +1280,11 @@ BOOL xf_ShowWindow(xfContext* xfc, xfAppWindow* appWindow, BYTE state)
 	WINPR_ASSERT(xfc);
 	WINPR_ASSERT(appWindow);
 
+	if (appWindow->rail_state != state)
+	{
+		appWindow->rail_state_pending = TRUE;
+		appWindow->rail_state_pending_since = GetTickCount64();
+	}
 	switch (state)
 	{
 		case WINDOW_HIDE:
@@ -1294,6 +1300,8 @@ BOOL xf_ShowWindow(xfContext* xfc, xfAppWindow* appWindow, BYTE state)
 			break;
 
 		case WINDOW_SHOW_MAXIMIZED:
+			/* Restore the local state before asynchronous WM property notifications. */
+			appWindow->minimized = FALSE;
 			/* Set the window as maximized */
 			appWindow->maxHorz = TRUE;
 			appWindow->maxVert = TRUE;
@@ -1317,9 +1325,14 @@ BOOL xf_ShowWindow(xfContext* xfc, xfAppWindow* appWindow, BYTE state)
 					redraw = TRUE;
 			}
 
+			/* Maximizing an iconic window does not itself map it in the local WM. */
+			LogDynAndXMapWindow(xfc->log, xfc->display, appWindow->handle);
 			break;
 
 		case WINDOW_SHOW:
+			appWindow->minimized = FALSE;
+			appWindow->maxHorz = FALSE;
+			appWindow->maxVert = FALSE;
 			/* Ensure the window is not maximized */
 			xf_SendClientEvent(xfc, appWindow->handle, xfc->NET_WM_STATE, 4, NET_WM_STATE_REMOVE,
 			                   xfc->NET_WM_STATE_MAXIMIZED_VERT, xfc->NET_WM_STATE_MAXIMIZED_HORZ,
@@ -1349,6 +1362,20 @@ BOOL xf_ShowWindow(xfContext* xfc, xfAppWindow* appWindow, BYTE state)
 			break;
 		default:
 			break;
+	}
+
+	/* A server-side restore (e.g. a remote taskbar click) maps the window,
+	 * but mapping alone does not activate it in the local window manager.
+	 * Request activation only on this transition, never on repaint/show echoes
+	 * or for menus and other non-activating tool windows. */
+	if (appWindow->rail_state == WINDOW_SHOW_MINIMIZED &&
+	    (state == WINDOW_SHOW || state == WINDOW_SHOW_MAXIMIZED) &&
+	    (appWindow->dwStyle & (WS_CAPTION | WS_SYSMENU)) &&
+	    !(appWindow->dwExStyle & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)))
+	{
+		const Atom active = XInternAtom(xfc->display, "_NET_ACTIVE_WINDOW", False);
+		/* Source 2: relaying the remote taskbar/window-manager action. */
+		xf_SendClientEvent(xfc, appWindow->handle, active, 3, 2, CurrentTime, 0);
 	}
 
 	/* Save the current rail state of this window */
@@ -1452,23 +1479,36 @@ BOOL xf_UpdateWindowArea(xfContext* xfc, xfAppWindow* appWindow, int x, int y, i
 
 	/*
 	 * With GFX a RemoteApp window shows its own surface, see xf_AppUpdateWindowFromSurface().
-	 * Until the server maps a surface to the window it has no content. xfc->image contains the
+	 * In HiDef mode, until the server maps a surface to the window it has no content. xfc->image contains the
 	 * hidden server desktop (black, wallpaper), painting from it flashes that in a new window,
 	 * e.g. the Snap bar when dragging a window. Leave the window empty until its surface is
 	 * mapped.
 	 */
 	const rdpGdi* gdi = xfc->common.context.gdi;
-	if (gdi && gdi->gfx)
+	if (gdi && gdi->gfx && freerdp_settings_get_bool(settings, FreeRDP_HiDefRemoteApp))
 		return FALSE;
 
+	/* Expose events can outlive a minimize/resize. Intersect both the local
+	 * pixmap and the server framebuffer before converting sizes to unsigned. */
+	INT64 left = MAX((INT64)x, MAX(0, -(INT64)appWindow->windowOffsetX));
+	INT64 top = MAX((INT64)y, MAX(0, -(INT64)appWindow->windowOffsetY));
+	INT64 right = MIN((INT64)x + width, MIN(appWindow->width, appWindow->pixmapWidth));
+	INT64 bottom = MIN((INT64)y + height, MIN(appWindow->height, appWindow->pixmapHeight));
+	if (freerdp_settings_get_bool(settings, FreeRDP_SoftwareGdi))
+	{
+		if (!xfc->image)
+			return FALSE;
+		right = MIN(right, (INT64)xfc->image->width - appWindow->windowOffsetX);
+		bottom = MIN(bottom, (INT64)xfc->image->height - appWindow->windowOffsetY);
+	}
+	if (right <= left || bottom <= top)
+		return FALSE;
+	x = (int)left;
+	y = (int)top;
+	width = (int)(right - left);
+	height = (int)(bottom - top);
 	ax = x + appWindow->windowOffsetX;
 	ay = y + appWindow->windowOffsetY;
-
-	if (ax + width > appWindow->windowOffsetX + appWindow->width)
-		width = (appWindow->windowOffsetX + appWindow->width - 1) - ax;
-
-	if (ay + height > appWindow->windowOffsetY + appWindow->height)
-		height = (appWindow->windowOffsetY + appWindow->height - 1) - ay;
 
 	if (freerdp_settings_get_bool(settings, FreeRDP_SoftwareGdi))
 	{

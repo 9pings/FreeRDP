@@ -18,6 +18,7 @@
  */
 
 #include <freerdp/config.h>
+#include <winpr/sysinfo.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -235,6 +236,19 @@ BOOL xf_rail_schedule_workarea(xfContext* xfc)
 	return xf_rail_send_workarea(xfc) == CHANNEL_RC_OK;
 }
 
+/* Ignore intermediate WM states while applying a server show/minimize order.
+ * Bound the wait in case a WM refuses the requested transition. */
+BOOL xf_rail_local_state_ready(xfAppWindow* window, BYTE observed, UINT64 now)
+{
+	if (window->rail_state_pending)
+	{
+		if (observed != window->rail_state && now - window->rail_state_pending_since < 1500)
+			return FALSE;
+		window->rail_state_pending = FALSE;
+	}
+	return observed != WINDOW_HIDE;
+}
+
 BOOL xf_rail_send_activate(xfContext* xfc, Window xwindow, BOOL enabled)
 {
 	RAIL_ACTIVATE_ORDER activate = WINPR_C_ARRAY_INIT;
@@ -303,7 +317,8 @@ BOOL xf_rail_adjust_position(xfContext* xfc, xfAppWindow* appWindow)
 	WINPR_ASSERT(xfc);
 	WINPR_ASSERT(appWindow);
 
-	if (!appWindow->is_mapped || appWindow->local_move.state != LMS_NOT_ACTIVE)
+	if (!appWindow->is_mapped || appWindow->local_move.state != LMS_NOT_ACTIVE ||
+	    appWindow->rail_state == WINDOW_SHOW_MINIMIZED)
 		return FALSE;
 
 	/* Only the server places override-redirect windows. */
@@ -1176,7 +1191,22 @@ xf_rail_monitored_desktop(WINPR_ATTR_UNUSED rdpContext* context,
 	}
 	if (orderInfo->fieldFlags & WINDOW_ORDER_FIELD_DESKTOP_ACTIVE_WND)
 	{
-		WLog_Print(xfc->log, WLOG_WARN, "TODO: implement WINDOW_ORDER_FIELD_DESKTOP_ACTIVE_WND");
+		/* Relay the server's activation after a user click in RemoteApp,
+		 * including switching to an already-visible window from a remote taskbar.
+		 * Unsolicited background activation must not steal the local focus. */
+		if (xfc->rail_activation_click &&
+		    GetTickCount64() - xfc->rail_activation_click < 2000)
+		{
+			xfAppWindow* window = xf_rail_get_window(xfc, monitoredDesktop->activeWindowId, FALSE);
+			if (window && (window->dwStyle & (WS_CAPTION | WS_SYSMENU)) &&
+			    !(window->dwExStyle & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)))
+			{
+				const Atom active = XInternAtom(xfc->display, "_NET_ACTIVE_WINDOW", False);
+				xfc->rail_activation_click = 0;
+				xf_SendClientEvent(xfc, window->handle, active, 3, 2, 0, 0);
+			}
+			xf_rail_return_window(window, FALSE);
+		}
 	}
 	if (orderInfo->fieldFlags & WINDOW_ORDER_FIELD_DESKTOP_ZORDER)
 	{
