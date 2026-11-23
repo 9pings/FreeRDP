@@ -381,15 +381,15 @@ static BOOL xf_event_Expose(xfContext* xfc, const XExposeEvent* event, BOOL app)
 		BOOL redraw = FALSE;
 		UINT64 windowId = 0;
 		UINT32 surfaceId = UINT16_MAX;
-		xfAppWindow* window = xf_AppWindowFromX11Window(xfc, event->window);
+		xfAppWindow* window = xf_AppWindowFromX11Window(xfc, event->window, FALSE);
 		if (window)
 		{
 			windowId = window->windowId;
 			surfaceId = window->surfaceId;
 			redraw = xf_UpdateWindowArea(xfc, window, event->x, event->y, event->width, event->height);
 		}
-		xf_rail_return_window(window, FALSE);
-		return !redraw || xf_AppWindowRepaintFromSurface(xfc, windowId, surfaceId);
+		xf_rail_return_window(window, FALSE, FALSE);
+		return !redraw || xf_AppWindowRepaintFromSurface(xfc, windowId, surfaceId, FALSE, FALSE);
 	}
 
 	if (!app && (freerdp_settings_get_bool(settings, FreeRDP_SmartSizing) ||
@@ -710,12 +710,12 @@ static BOOL xf_event_FocusIn(xfContext* xfc, const XFocusInEvent* event, BOOL ap
 		/* Activate ordinary application windows selected from the local taskbar.
 		 * Leave popup/menu focus and FocusOut alone: deactivating their owner
 		 * while opening a menu would make Windows close the menu immediately. */
-		xfAppWindow* window = xf_AppWindowFromX11Window(xfc, event->window);
+		xfAppWindow* window = xf_AppWindowFromX11Window(xfc, event->window, FALSE);
 		const BOOL activate = window && !window->minimized &&
 		    window->rail_state != WINDOW_HIDE && window->rail_state != WINDOW_SHOW_MINIMIZED &&
 		    (window->dwStyle & (WS_CAPTION | WS_SYSMENU)) &&
 		    !(window->dwExStyle & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW));
-		xf_rail_return_window(window, FALSE);
+		xf_rail_return_window(window, FALSE, FALSE);
 		if (activate && !xf_rail_send_activate(xfc, event->window, TRUE))
 			return FALSE;
 	}
